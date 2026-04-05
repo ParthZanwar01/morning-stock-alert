@@ -14,5 +14,5 @@ jobs:
           python-version: '3.11'
       - name: Run stock alert
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python stock_alert.py
