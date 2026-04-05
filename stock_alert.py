@@ -5,8 +5,9 @@ from email.mime.multipart import MIMEMultipart
 
 GMAIL_USER         = "parth.zanwar01@gmail.com"
 GMAIL_APP_PASSWORD = "yrbwvhwtnvutttit"
-RECIPIENTS         = ["parth.zanwar01@gmail.com", "2812032093@txt.att.net"]
-ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
+EMAIL_RECIPIENT    = "parth.zanwar01@gmail.com"
+SMS_RECIPIENT      = "2812032093@txt.att.net"
+GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 BUDGET             = 200.0   # dollars available to invest
 
 DIVIDEND_STOCKS = [
@@ -31,7 +32,6 @@ TECH_AI_STOCKS = [
     ("TSM",  "TSMC"),
 ]
 
-# Global market context queries — broad headlines Claude uses for macro context
 GLOBAL_QUERIES = [
     "S&P 500 market today",
     "Federal Reserve interest rates",
@@ -40,7 +40,6 @@ GLOBAL_QUERIES = [
 ]
 
 
-# ── Fetch real-time quote ─────────────────────────────────────────────────────
 def fetch_quote(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2d"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -56,7 +55,6 @@ def fetch_quote(symbol):
         return 0, 0
 
 
-# ── Fetch news headlines from Yahoo Finance ───────────────────────────────────
 def fetch_news(query, count=3):
     url = (f"https://query1.finance.yahoo.com/v1/finance/search"
            f"?q={urllib.request.quote(query)}&newsCount={count}&quotesCount=0")
@@ -69,12 +67,10 @@ def fetch_news(query, count=3):
         return []
 
 
-# ── Fetch global macro headlines ──────────────────────────────────────────────
 def fetch_global_headlines():
     headlines = []
     for q in GLOBAL_QUERIES:
         headlines.extend(fetch_news(q, count=2))
-    # De-duplicate while preserving order
     seen, unique = set(), []
     for h in headlines:
         if h not in seen:
@@ -83,47 +79,33 @@ def fetch_global_headlines():
     return unique[:8]
 
 
-# ── Ask Claude to analyze news and give a verdict ────────────────────────────
-def claude_analyze(symbol, name, stock_headlines, global_headlines):
-    """Returns (score, reason, verdict) where score ∈ {-1, 0, 1}."""
-    if not ANTHROPIC_API_KEY:
+def gemini_analyze(symbol, name, stock_headlines, global_headlines):
+    if not GEMINI_API_KEY:
         return 0, "No API key.", "NEUTRAL"
-
     global_block = "\n".join(f"- {h}" for h in global_headlines) if global_headlines else "- None available"
     stock_block  = "\n".join(f"- {h}" for h in stock_headlines)  if stock_headlines  else "- No recent news"
-
     prompt = (
-        f"You are a sharp stock market analyst. Today is {date.today().strftime('%B %d, %Y')}.\n\n"
-        f"GLOBAL MARKET HEADLINES RIGHT NOW:\n{global_block}\n\n"
-        f"HEADLINES SPECIFIC TO {name} ({symbol}):\n{stock_block}\n\n"
-        f"Given all of the above, will {symbol} most likely go UP or DOWN in today's trading session?\n\n"
+        f"You are a sharp stock market analyst. Today is {'{'}date.today().strftime('%B %d, %Y'){'}'}.\n\n"
+        f"GLOBAL MARKET HEADLINES RIGHT NOW:\n{'{'}global_block{'}'}\n\n"
+        f"HEADLINES SPECIFIC TO {'{'}name{'}'} ({'{'}symbol{'}'}):\n{'{'}stock_block{'}'}\n\n"
+        f"Given all of the above, will {'{'}symbol{'}'} most likely go UP or DOWN in today's trading session?\n\n"
         f"Reply in this exact format (two lines only):\n"
         f"VERDICT: BULLISH or BEARISH or NEUTRAL\n"
         f"REASON: One concise sentence explaining your call."
     )
-
     payload = json.dumps({
-        "model":      "claude-haiku-4-5-20251001",
-        "max_tokens": 120,
-        "messages":   [{"role": "user", "content": prompt}]
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 100}
     }).encode("utf-8")
-
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "x-api-key":         ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type":      "application/json",
-        },
-        method="POST"
+    api_url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={'{'}GEMINI_API_KEY{'}'}"
     )
-
+    req = urllib.request.Request(api_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             result = json.loads(resp.read())
-        text = result["content"][0]["text"].strip()
-
+        text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
         verdict, reason = "NEUTRAL", text
         for line in text.split("\n"):
             line = line.strip()
@@ -131,104 +113,103 @@ def claude_analyze(symbol, name, stock_headlines, global_headlines):
                 verdict = line.split(":", 1)[1].strip().upper()
             elif line.upper().startswith("REASON:"):
                 reason = line.split(":", 1)[1].strip()
-
         score = 1 if "BULLISH" in verdict else (-1 if "BEARISH" in verdict else 0)
         return score, reason, verdict
-
     except Exception as e:
-        print(f"  Claude error for {symbol}: {e}")
+        print(f"  Gemini error for {'{'}symbol{'}'}: {'{'}e{'}'}")
         return 0, "Analysis unavailable.", "NEUTRAL"
 
 
-# ── Rank stocks by blended momentum + AI sentiment ───────────────────────────
 def get_top_picks(watchlist, global_headlines, n=3):
     results = []
     for symbol, name in watchlist:
-        print(f"  Analysing {symbol}…")
+        print(f"  Analysing {'{'}symbol{'}'}...")
         price, chg_pct = fetch_quote(symbol)
         if price == 0:
             continue
-        stock_headlines          = fetch_news(symbol, count=3)
-        ai_score, reason, verdict = claude_analyze(symbol, name, stock_headlines, global_headlines)
-        combined                 = (chg_pct * 0.7) + (ai_score * 3.0)
-        top_headline             = stock_headlines[0] if stock_headlines else "No recent news"
-        shares_affordable        = int(BUDGET // price) if price > 0 else 0
-        results.append((symbol, name, price, chg_pct,
-                        top_headline, ai_score, reason, verdict,
-                        combined, shares_affordable))
-
+        stock_headlines           = fetch_news(symbol, count=3)
+        ai_score, reason, verdict = gemini_analyze(symbol, name, stock_headlines, global_headlines)
+        combined                  = (chg_pct * 0.7) + (ai_score * 3.0)
+        top_headline              = stock_headlines[0] if stock_headlines else "No recent news"
+        shares_affordable         = int(BUDGET // price) if price > 0 else 0
+        results.append((symbol, name, price, chg_pct, top_headline, ai_score, reason, verdict, combined, shares_affordable))
     results.sort(key=lambda x: x[8], reverse=True)
     return results[:n]
 
 
-# ── Build the email / SMS body ────────────────────────────────────────────────
-def build_message():
+def build_email_body(div_picks, tech_picks, global_headlines):
     today = date.today().strftime("%A, %B %d, %Y")
-
-    print("Fetching global market headlines…")
-    global_headlines = fetch_global_headlines()
-
-    print("Analysing dividend picks…")
-    div_picks  = get_top_picks(DIVIDEND_STOCKS, global_headlines)
-
-    print("Analysing tech / AI picks…")
-    tech_picks = get_top_picks(TECH_AI_STOCKS, global_headlines)
-
     def fmt(pick):
         symbol, name, price, chg, headline, _, reason, verdict, _, shares = pick
         sign  = "+" if chg >= 0 else ""
-        arrow = "UP ↑" if verdict == "BULLISH" else ("DOWN ↓" if verdict == "BEARISH" else "FLAT →")
-        budget_note = (f"  Budget: ${BUDGET:.0f} buys ~{shares} share{'s' if shares != 1 else ''} "
-                       f"@ ${price:.2f}" if shares > 0 else f"  Budget: ${price:.2f}/share (>{BUDGET:.0f})")
-        return (
-            f"• {symbol} ({name})\n"
-            f"  ${price:.2f}  {sign}{chg:.2f}% today  |  Claude: {verdict} ({arrow})\n"
-            f"  Why: {reason}\n"
-            f"  News: {headline}\n"
-            f"{budget_note}"
-        )
-
-    global_summary = "\n".join(f"  • {h}" for h in global_headlines[:4])
-
+        arrow = "UP" if verdict == "BULLISH" else ("DOWN" if verdict == "BEARISH" else "FLAT")
+        budget_note = (f"  Budget: {BUDGET:.0f{'}'} buys ~{'{'}shares{'}'} share{'{'}'s' if shares != 1 else ''{'}'}  @ {price:.2f{'}'}" if shares > 0 else f"  Budget: {price:.2f{'}'}/share (>{BUDGET:.0f{'}'})")
+        return (f"* {'{'}symbol{'}'} ({'{'}name{'}'})
+  {price:.2f{'}'}  {'{'}sign{'}'}{'{'}chg:.2f{'}'}% today  |  AI: {'{'}verdict{'}'} ({'{'}arrow{'}'})
+  Why: {'{'}reason{'}'}
+  News: {'{'}headline{'}'}
+{'{'}budget_note{'}'}")
+    global_summary = "\n".join(f"  * {'{'}h{'}'}" for h in global_headlines[:4])
     body = (
-        f"Good morning Parth!  Morning Stock Picks — {today}\n"
-        f"Budget: ${BUDGET:.0f}  |  AI: Claude (Anthropic)\n\n"
-        f"{'='*46}\n"
-        f"  TODAY'S GLOBAL MARKET CONTEXT\n"
-        f"{'='*46}\n"
-        f"{global_summary}\n\n"
-        f"{'='*46}\n"
-        f"  DIVIDEND PICKS  (Top 3)\n"
-        f"{'='*46}\n"
-        + "\n\n".join(fmt(p) for p in div_picks) +
-        f"\n\n{'='*46}\n"
-        f"  TECH / AI PICKS  (Top 3)\n"
-        f"{'='*46}\n"
-        + "\n\n".join(fmt(p) for p in tech_picks) +
-        f"\n\nMarkets open 9:30 AM ET  |  Data: Yahoo Finance\n"
-        f"— Your Claude Stock Alert"
+        f"Good morning Parth! Morning Stock Picks - {'{'}today{'}'}\n"
+        f"Budget: {BUDGET:.0f{'}'}  |  AI: Google Gemini 2.0\n\n"
+        f"{'='*46}\n  TODAY'S GLOBAL MARKET CONTEXT\n{'='*46}\n"
+        f"{'{'}global_summary{'}'}\n\n"
+        f"{'='*46}\n  DIVIDEND PICKS  (Top 3)\n{'='*46}\n"
+        + "\n\n".join(fmt(p) for p in div_picks)
+        + f"\n\n{'='*46}\n  TECH / AI PICKS  (Top 3)\n{'='*46}\n"
+        + "\n\n".join(fmt(p) for p in tech_picks)
+        + f"\n\nMarkets open 9:30 AM ET  |  Data: Yahoo Finance\n-- Your Morning Stock Alert"
     )
-
-    subject = f"📈 Morning Picks — {today}  |  ${BUDGET:.0f} Budget"
-    return subject, body
+    return body
 
 
-# ── Send via Gmail SMTP (+ AT&T SMS gateway) ─────────────────────────────────
-def send_alert(subject, body):
-    msg            = MIMEMultipart()
-    msg["From"]    = GMAIL_USER
-    msg["To"]      = ", ".join(RECIPIENTS)
+def build_sms_body(div_picks, tech_picks):
+    def short(pick):
+        symbol, name, price, chg, _, _, _, verdict, _, shares = pick
+        sign  = "+" if chg >= 0 else ""
+        arrow = "^" if verdict == "BULLISH" else ("v" if verdict == "BEARISH" else "-")
+        return f"{'{'}symbol{'}'} {price:.2f{'}'} {'{'}sign{'}'}{'{'}chg:.1f{'}'}% {'{'}arrow{'}'}"
+    d_lines = " | ".join(short(p) for p in div_picks)
+    t_lines = " | ".join(short(p) for p in tech_picks)
+    today   = date.today().strftime("%m/%d")
+    return f"Stocks {'{'}today{'}'}\nDIV: {'{'}d_lines{'}'}\nTECH: {'{'}t_lines{'}'}\nBudget {BUDGET:.0f{'}'}"
+
+
+def send_email(subject, body, recipient):
+    msg         = MIMEMultipart()
+    msg["From"] = GMAIL_USER
+    msg["To"]   = recipient
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
-
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
         server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_USER, RECIPIENTS, msg.as_string())
-    print(f"✓ Alert sent: {subject}")
+        server.sendmail(GMAIL_USER, [recipient], msg.as_string())
+    print(f"  Sent to {'{'}recipient{'}'}")
+
+
+def send_alerts(div_picks, tech_picks, global_headlines):
+    today      = date.today().strftime("%A, %B %d, %Y")
+    email_subj = f"Morning Stock Picks - {'{'}today{'}'}"
+    sms_subj   = f"Stocks {'{'}date.today().strftime('%m/%d'){'}'}"
+    email_body = build_email_body(div_picks, tech_picks, global_headlines)
+    sms_body   = build_sms_body(div_picks, tech_picks)
+    print("Sending email...")
+    send_email(email_subj, email_body, EMAIL_RECIPIENT)
+    print("Sending SMS...")
+    send_email(sms_subj, sms_body, SMS_RECIPIENT)
+    print("Done! Email + SMS sent.")
+    return email_subj, email_body
 
 
 if __name__ == "__main__":
-    subject, body = build_message()
+    print("Fetching global market headlines...")
+    global_headlines = fetch_global_headlines()
+    print("Analysing dividend picks...")
+    div_picks  = get_top_picks(DIVIDEND_STOCKS, global_headlines)
+    print("Analysing tech / AI picks...")
+    tech_picks = get_top_picks(TECH_AI_STOCKS, global_headlines)
+    subject, body = send_alerts(div_picks, tech_picks, global_headlines)
+    print("\n--- EMAIL PREVIEW ---")
     print(body)
-    send_alert(subject, body)
