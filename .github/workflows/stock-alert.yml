@@ -1,10 +1,8 @@
 name: Morning Stock Alert
-
 on:
   schedule:
-    - cron: '30 12 * * 1-5'
+    - cron: '30 12 * * 1-5'  # 7:30 AM CDT (UTC-5)
   workflow_dispatch:
-
 jobs:
   send-alert:
     runs-on: ubuntu-latest
@@ -15,4 +13,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Run stock alert
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python stock_alert.py
